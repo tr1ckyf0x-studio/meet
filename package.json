@@ -1,0 +1,23 @@
+{
+  "name": "meet",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch server/main.ts",
+    "start": "bun server/main.ts",
+    "test": "bun test",
+    "check": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "fast-xml-parser": "5.12.0",
+    "hono": "4.13.14",
+    "ical.js": "2.2.1",
+    "nodemailer": "10.5.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "@types/nodemailer": "8.0.2",
+    "typescript": "7.0.2"
+  }
+}

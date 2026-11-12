@@ -23,9 +23,9 @@ describe("fetch guard", () => {
     expect(() => parseUserUrl("https://user:pw@example.com/")).toThrow();
   });
 
-  const target = Bun.serve({
+  const target: ReturnType<typeof Bun.serve> = Bun.serve({
     port: 0, hostname: "127.0.0.1",
-    fetch(req) {
+    fetch(req): Response {
       const u = new URL(req.url);
       if (u.pathname === "/to-localhost") return Response.redirect(`http://localhost:${target.port}/cal.ics`, 302);
       if (u.pathname === "/big") return new Response("x".repeat(2000));

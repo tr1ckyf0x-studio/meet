@@ -145,9 +145,9 @@ export async function safeFetch(url: string, init: RequestInit = {}, o: GuardOpt
     let size = 0;
     if (reader) {
       for (;;) {
-        let r: ReadableStreamReadResult<Uint8Array>;
+        let r: { done: boolean; value?: Uint8Array };
         try { r = await reader.read(); } catch { throw new FetchError(signal.aborted ? "timeout" : "network"); }
-        if (r.done) break;
+        if (r.done || !r.value) break;
         size += r.value.length;
         if (size > maxBytes) { await reader.cancel(); throw new FetchError("too_large"); }
         chunks.push(r.value);

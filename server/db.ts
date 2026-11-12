@@ -54,7 +54,7 @@ export interface Connection {
 }
 
 export interface LoginToken { hash: string; email: string; invite: string | null; signup: boolean; next: string | null; lang: Lang | null; expiresAt: number }
-export interface OAuthState { hash: string; userId: string; provider: string; verifier: string; expiresAt: number }
+export interface OAuthState { hash: string; userId: string; provider: string; verifier: string; back: string | null; expiresAt: number }
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS oauth_states (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   provider TEXT NOT NULL,
   verifier TEXT NOT NULL,
+  back TEXT,
   expires_at INTEGER NOT NULL
 );
 `;
@@ -476,15 +477,18 @@ export class Store {
   /* ---------- OAuth states ---------- */
 
   createOAuthState(s: OAuthState): void {
-    this.db.query("INSERT INTO oauth_states (hash, user_id, provider, verifier, expires_at) VALUES (?, ?, ?, ?, ?)")
-      .run(s.hash, s.userId, s.provider, s.verifier, s.expiresAt);
+    this.db.query("INSERT INTO oauth_states (hash, user_id, provider, verifier, back, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(s.hash, s.userId, s.provider, s.verifier, s.back, s.expiresAt);
   }
 
   takeOAuthState(hash: string, now: number): OAuthState | null {
     return this.tx(() => {
       const r = this.db.query("SELECT * FROM oauth_states WHERE hash = ? AND expires_at > ?").get(hash, now) as Row | null;
       this.db.query("DELETE FROM oauth_states WHERE hash = ?").run(hash);
-      return r ? { hash: r.hash as string, userId: r.user_id as string, provider: r.provider as string, verifier: r.verifier as string, expiresAt: r.expires_at as number } : null;
+      return r ? {
+        hash: r.hash as string, userId: r.user_id as string, provider: r.provider as string, verifier: r.verifier as string,
+        back: (r.back as string | null) ?? null, expiresAt: r.expires_at as number,
+      } : null;
     });
   }
 

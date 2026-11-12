@@ -19,7 +19,8 @@ Live at https://meet.tr1ckyf0x.dev (sign-up through a meeting invitation).
 - Calendar passwords, OAuth refresh tokens and secret ICS links are encrypted (AES-256-GCM) with a key generated on
   first start into the data directory, so a copy of the database alone does not reveal them.
 - A meeting, with all marks and votes in it, is deleted after the date its organizer chose.
-- URLs users give (ICS links, CalDAV servers) are fetched only if they resolve to public addresses.
+- URLs users give (ICS links, CalDAV servers) are fetched only if they resolve to public addresses, and the connection
+  goes to exactly the address that was checked (no DNS rebinding); every redirect is checked again.
 
 ## Features
 
@@ -47,6 +48,8 @@ Bun 1.4, SQLite, one process. `docker build .` runs the tests and the type check
 | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | enables Outlook / Microsoft 365 |
 | `SECURE_COOKIES` | `false` for plain-HTTP local runs |
 | `ALLOW_PRIVATE_URLS` | `true` only for local testing against a CalDAV server on your network |
+| `FETCH_DENY_SUFFIXES` | comma-separated host names (with subdomains) never fetched as calendars, e.g. your own domain |
+| `FETCH_DENY_ADDRESSES_OF` | comma-separated host names whose addresses are never connected to, e.g. the dynamic DNS name of your home WAN address (hairpin NAT would lead back inside) |
 
 ### Google Calendar
 

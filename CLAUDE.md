@@ -17,8 +17,15 @@ plan: `docs/superpowers/plans/`. Deploy notes for the owner's server live outsid
 - **Only intervals leave a calendar.** Every adapter (`server/calendars/*`) returns `Iv[]`; nothing else is stored.
   Other members get a member's merged `unavailable` clipped to the group's range (`meeting.ts`, `groupState`), never
   emails or connection labels.
-- **User URLs go through `safeFetch`** (`fetchguard.ts`): public addresses only, every redirect re-checked, Basic auth only
-  to the same site (iCloud hops between `pNN-caldav.icloud.com`). Tests pin IPv4-mapped IPv6 tricks too.
+- **User URLs go through `safeFetch`** (`fetchguard.ts`): node:http with a `lookup` that checks every address, so the
+  socket goes to the checked IP (Bun honours `lookup`; IP literals skip it and are checked before the request). Public
+  addresses only, deny lists from the env (own zone, the home WAN address), every redirect re-checked, Basic auth only to
+  the same site (iCloud hops between `pNN-caldav.icloud.com`). Tests pin IPv4-mapped IPv6 tricks too.
+- **Parsing has a budget** (`parse.ts`): 300k recurrence steps per sync, sub-hourly series skipped; over it the
+  connection fails with `too_large` rather than silently reading half a calendar. Zone offsets are cached per quarter hour.
+- **Only calendars with status `ok` count**: a new or failing one must not make its owner look free all day.
+- **Mail is budgeted** (the relay's daily quota is shared with other services): login mails 150/day, per invite 30/h,
+  meeting mails 200/day, cancels 3 per group per day. `clientIp` trusts `CF-Connecting-IP` only from Cloudflare peers.
 - **Magic links**: 15 min, single use, GET shows a button and only POST consumes (mail scanners prefetch links).
   `/login` answers the same whether or not an email gets sent.
 - **A meeting is set** when every member (at least two) says yes to an open proposal (`evaluate`); join/leave/votes re-run it.

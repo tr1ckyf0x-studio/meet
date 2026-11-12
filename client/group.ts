@@ -329,13 +329,16 @@ function paintCells() {
   if (mode === "all") {
     const responded = S.members.filter((m) => m.responded);
     const covs = responded.map((m) => coverage(m.unavailable));
+    const meeting = S.proposals.filter((p) => p.id === S.group.confirmedId).map((p) => [p.start, p.end] as Iv);
+    const proposed = S.group.confirmedId ? [] : S.proposals.filter((p) => p.status === "open").map((p) => [p.start, p.end] as Iv);
+    const inMeeting = coverage(meeting), inProposal = coverage(proposed.sort((a, b) => a[0] - b[0]));
     cells.forEach((c, i) => {
       const el = cellEls[i]!;
       if (c.out) { el.className = "cell out"; return; }
       const free = covs.filter((cv) => !cv[i]).length;
       const n = responded.length;
       const lvl = n === 0 ? 0 : free === n ? 6 : Math.round((free / n) * 5);
-      el.className = `cell lv${lvl}${selected && selected.s === c.s ? " sel" : ""}`;
+      el.className = `cell lv${lvl}${inMeeting[i] ? " mtg" : inProposal[i] ? " prop" : ""}${selected && selected.s === c.s ? " sel" : ""}`;
     });
   } else {
     const me = S.members.find((m) => m.id === S.me.id)!;
@@ -517,9 +520,19 @@ function render() {
   const sc = app.querySelector<HTMLElement>(".grid-scroll")!;
   if (scroll) { sc.scrollLeft = scroll.x; sc.scrollTop = scroll.y; }
   else {
-    // First view: start around 08:00.
-    const row = sc.querySelector<HTMLElement>(`.cell[data-i="${16}"]`);
-    if (row) sc.scrollTop = Math.max(0, row.offsetTop - 40);
+    // First view: the meeting, else the first proposal or suggestion, else 08:00 of the first day.
+    const focus = S.proposals.find((p) => p.id === S.group.confirmedId)?.start
+      ?? S.proposals.find((p) => p.status === "open")?.start ?? S.suggestions.windows[0]?.start;
+    let idx = 16;
+    if (focus !== undefined) {
+      const hit = cells.findIndex((c) => !c.out && c.s <= focus && focus < c.e);
+      if (hit >= 0) idx = hit;
+    }
+    const el = cellEls[idx];
+    if (el) {
+      sc.scrollTop = Math.max(0, el.offsetTop - 60);
+      sc.scrollLeft = Math.max(0, el.offsetLeft - 80);
+    }
   }
 }
 

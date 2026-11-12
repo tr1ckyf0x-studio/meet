@@ -1,5 +1,5 @@
 import { normalize, type Iv } from "../../shared/intervals";
-import { DAY } from "../../shared/time";
+import { DAY, zonedToUtc } from "../../shared/time";
 import { FetchError } from "./fetchguard";
 
 // Google Calendar and Microsoft Graph. Both reduce to busy intervals: Google's FreeBusy API returns
@@ -114,7 +114,7 @@ export async function listCalendars(p: Provider, accessToken: string, f: F = fet
 }
 
 /** Busy time of the selected calendars in [lo, hi). */
-export async function providerBusy(p: Provider, accessToken: string, ids: string[], lo: number, hi: number, f: F = fetch): Promise<Iv[]> {
+export async function providerBusy(p: Provider, accessToken: string, ids: string[], lo: number, hi: number, f: F = fetch, tz = "UTC"): Promise<Iv[]> {
   const out: Iv[] = [];
   if (!ids.length) return out;
   if (p === "google") {
@@ -127,6 +127,8 @@ export async function providerBusy(p: Provider, accessToken: string, ids: string
           body: JSON.stringify({ timeMin: new Date(s).toISOString(), timeMax: new Date(e).toISOString(), items: ids.slice(i, i + 50).map((id) => ({ id })) }),
         })) as { calendars?: Record<string, { busy?: { start: string; end: string }[]; errors?: unknown[] }> };
         for (const c of Object.values(j.calendars ?? {})) {
+          // A calendar Google could not read would otherwise look free.
+          if (c.errors?.length) throw new FetchError("calendar_error");
           for (const b of c.busy ?? []) out.push([Date.parse(b.start), Date.parse(b.end)]);
         }
       }
@@ -136,16 +138,19 @@ export async function providerBusy(p: Provider, accessToken: string, ids: string
   const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
   for (const id of ids) {
     let url: string | undefined = `${GRAPH}/me/calendars/${encodeURIComponent(id)}/calendarView?` +
-      new URLSearchParams({ startDateTime: iso(lo), endDateTime: iso(hi), $select: "start,end,showAs,isCancelled", $top: "500" });
+      new URLSearchParams({ startDateTime: iso(lo), endDateTime: iso(hi), $select: "start,end,showAs,isCancelled,isAllDay", $top: "500" });
     for (let pages = 0; url && pages < 50; pages++) {
       const j = (await getJson(f, url, accessToken, { headers: { prefer: 'outlook.timezone="UTC"' } })) as {
-        value?: { start?: { dateTime: string }; end?: { dateTime: string }; showAs?: string; isCancelled?: boolean }[];
+        value?: { start?: { dateTime: string }; end?: { dateTime: string }; showAs?: string; isCancelled?: boolean; isAllDay?: boolean }[];
         "@odata.nextLink"?: string;
       };
       for (const ev of j.value ?? []) {
         if (ev.isCancelled || ev.showAs === "free" || ev.showAs === "workingElsewhere") continue;
         if (!ev.start || !ev.end) continue;
-        const s = Date.parse(ev.start.dateTime.slice(0, 23) + "Z"), e = Date.parse(ev.end.dateTime.slice(0, 23) + "Z");
+        // All-day events are calendar days, not UTC instants: midnight to midnight in the user's own zone.
+        const day = (dt: string) => { const [y, m, d] = dt.slice(0, 10).split("-").map(Number) as [number, number, number]; return zonedToUtc(y, m, d, 0, 0, tz); };
+        const s = ev.isAllDay ? day(ev.start.dateTime) : Date.parse(ev.start.dateTime.slice(0, 23) + "Z");
+        const e = ev.isAllDay ? day(ev.end.dateTime) : Date.parse(ev.end.dateTime.slice(0, 23) + "Z");
         if (e > s) out.push([s, e]);
       }
       url = j["@odata.nextLink"];

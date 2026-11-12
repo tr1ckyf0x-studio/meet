@@ -1,5 +1,8 @@
 import { lookup } from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import { isIP } from "node:net";
+import { gunzipSync, inflateSync } from "node:zlib";
 
 // Users give us URLs (ICS links, CalDAV servers) that the server then fetches. Without a guard that is a
 // way into the home network: the router, Komodo, other containers. Every hop must resolve to public
@@ -61,6 +64,8 @@ export function isPrivateAddress(ip: string): boolean {
   if ((g[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
   if ((g[0]! & 0xff00) === 0xff00) return true; // multicast
   if (g[0] === 0x2001 && g[1] === 0x0db8) return true; // documentation
+  if (g[0] === 0x2002) return true; // 6to4 (embeds an IPv4 address)
+  if (g[0] === 0x2001 && g[1] === 0) return true; // Teredo
   return false;
 }
 
@@ -72,25 +77,63 @@ export interface GuardOptions {
   allowPrivate?: boolean;
   /** Tests only: host names exempt from the check. */
   allowHosts?: string[];
+  /** Host names (and their subdomains) never fetched, e.g. the operator's own zone. */
+  denySuffixes?: string[];
+  /** Host names whose current addresses are never connected to, e.g. a dynamic DNS name of the home WAN address:
+   *  a public address that loops back into the operator's network through hairpin NAT. */
+  denyAddressesOf?: string[];
 }
 
 export interface FetchResult { status: number; url: string; headers: Headers; text: string }
 
-async function assertPublic(host: string, o: GuardOptions): Promise<void> {
+const denyCache = new Map<string, { at: number; ips: string[] }>();
+async function deniedAddresses(o: GuardOptions): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const name of o.denyAddressesOf ?? []) {
+    let e = denyCache.get(name);
+    if (!e || Date.now() - e.at > 5 * 60_000) {
+      const ips = await lookup(name, { all: true, verbatim: true }).then((r) => r.map((x) => x.address), () => e?.ips ?? []);
+      e = { at: Date.now(), ips };
+      denyCache.set(name, e);
+    }
+    for (const ip of e.ips) out.add(ip);
+  }
+  return out;
+}
+
+/** Checks a host before connecting. IP literals are checked here: node:http does not call `lookup` for them. */
+async function checkTarget(host: string, o: GuardOptions): Promise<void> {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  if (o.denySuffixes?.some((d) => h === d || h.endsWith("." + d))) throw new FetchError("private_address");
+  if (isIP(h)) return checkAddresses(h, [h], o);
+  if (o.allowPrivate || o.allowHosts?.includes(h)) return;
+  if (!h.includes(".") || /\.(local|internal|lan|home|localhost|home\.arpa)$/i.test(h)) throw new FetchError("private_address");
+}
+
+async function checkAddresses(host: string, addrs: string[], o: GuardOptions): Promise<void> {
+  if (!addrs.length) throw new FetchError("dns");
+  const denied = await deniedAddresses(o);
+  if (addrs.some((a) => denied.has(a))) throw new FetchError("private_address");
   if (o.allowPrivate || o.allowHosts?.includes(host)) return;
-  const bare = host.replace(/^\[|\]$/g, "");
-  if (isIP(bare)) {
-    if (isPrivateAddress(bare)) throw new FetchError("private_address");
-    return;
-  }
-  if (!bare.includes(".") || /\.(local|internal|lan|home|localhost)$/i.test(bare)) throw new FetchError("private_address");
-  let addrs: { address: string }[];
-  try {
-    addrs = await lookup(bare, { all: true, verbatim: true });
-  } catch {
-    throw new FetchError("dns");
-  }
-  if (!addrs.length || addrs.some((a) => isPrivateAddress(a.address))) throw new FetchError("private_address");
+  if (addrs.some(isPrivateAddress)) throw new FetchError("private_address");
+}
+
+/**
+ * A DNS lookup for node:http that checks every address it returns. The connection then goes to exactly the
+ * checked address, so a name cannot answer "public" to the check and "private" to the connect (DNS rebinding).
+ */
+function guardedLookup(o: GuardOptions) {
+  return (hostname: string, options: { all?: boolean } | number | undefined, cb: (...a: unknown[]) => void) => {
+    const host = hostname.replace(/^\[|\]$/g, "");
+    const done = (addrs: { address: string; family: number }[]) => {
+      checkAddresses(host, addrs.map((a) => a.address), o).then(() => {
+        if (typeof options === "object" && options?.all) cb(null, addrs);
+        else cb(null, addrs[0]!.address, addrs[0]!.family);
+      }, (e) => cb(e));
+    };
+    if (isIP(host)) return done([{ address: host, family: isIP(host) }]);
+    lookup(host, { all: true, verbatim: true }).then(done, () => cb(new FetchError("dns")));
+  };
 }
 
 /** Same host, or the same last two labels (caldav.icloud.com -> p42-caldav.icloud.com). */
@@ -111,8 +154,48 @@ export function parseUserUrl(input: string): URL {
   return u;
 }
 
+interface RawResponse { status: number; headers: Headers; body: Buffer }
+
+function rawRequest(url: URL, method: string, headers: Headers, body: string | undefined, o: GuardOptions, signal: AbortSignal, maxBytes: number): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const mod = url.protocol === "https:" ? https : http;
+    const h: Record<string, string> = {};
+    headers.forEach((v, k) => { h[k] = v; });
+    if (body !== undefined) h["content-length"] = String(Buffer.byteLength(body));
+    if (!h["accept-encoding"]) h["accept-encoding"] = "gzip, deflate";
+    let failed = false;
+    const fail = (e: unknown) => { if (!failed) { failed = true; reject(e); } };
+    const req = mod.request(url, { method, headers: h, lookup: guardedLookup(o) as never, signal, agent: false }, (res) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on("data", (c: Buffer) => {
+        if (failed) return;
+        size += c.length;
+        if (size > maxBytes) { fail(new FetchError("too_large")); req.destroy(); return; }
+        chunks.push(c);
+      });
+      res.on("end", () => {
+        if (failed) return;
+        let buf = Buffer.concat(chunks);
+        try {
+          const enc = String(res.headers["content-encoding"] ?? "").toLowerCase();
+          if (enc === "gzip") buf = gunzipSync(buf, { maxOutputLength: maxBytes });
+          else if (enc === "deflate") buf = inflateSync(buf, { maxOutputLength: maxBytes });
+        } catch { fail(new FetchError("too_large")); return; }
+        const out = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : String(v));
+        resolve({ status: res.statusCode ?? 0, headers: out, body: buf });
+      });
+      res.on("error", fail);
+    });
+    req.on("error", fail);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
 /** fetch() for user-supplied URLs: public addresses only (every redirect re-checked), bounded size and time. */
-export async function safeFetch(url: string, init: RequestInit = {}, o: GuardOptions = {}): Promise<FetchResult> {
+export async function safeFetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}, o: GuardOptions = {}): Promise<FetchResult> {
   const maxBytes = o.maxBytes ?? 10 * 1024 * 1024;
   const signal = AbortSignal.timeout(o.timeoutMs ?? 20_000);
   let current = parseUserUrl(url);
@@ -122,17 +205,17 @@ export async function safeFetch(url: string, init: RequestInit = {}, o: GuardOpt
   const start = current;
   for (let hop = 0; ; hop++) {
     if (hop > (o.maxRedirects ?? 5)) throw new FetchError("too_many_redirects");
-    await assertPublic(current.hostname, o);
-    let res: Response;
+    await checkTarget(current.hostname.replace(/^\[|\]$/g, ""), o);
+    let res: RawResponse;
     try {
-      res = await fetch(current, { ...init, method, body, headers, redirect: "manual", signal });
+      res = await rawRequest(current, method, headers, body, o, signal, maxBytes);
     } catch (e) {
+      if (e instanceof FetchError) throw e;
       if (signal.aborted) throw new FetchError("timeout");
       throw new FetchError("network", String((e as Error)?.message ?? e));
     }
     const loc = res.headers.get("location");
     if (res.status >= 300 && res.status < 400 && loc) {
-      await res.body?.cancel();
       const next = new URL(loc, current);
       if (next.protocol !== "https:" && next.protocol !== "http:") throw new FetchError("bad_url");
       if (!sameSite(start, next)) headers.delete("authorization");
@@ -140,19 +223,6 @@ export async function safeFetch(url: string, init: RequestInit = {}, o: GuardOpt
       current = next;
       continue;
     }
-    const reader = res.body?.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    if (reader) {
-      for (;;) {
-        let r: { done: boolean; value?: Uint8Array };
-        try { r = await reader.read(); } catch { throw new FetchError(signal.aborted ? "timeout" : "network"); }
-        if (r.done || !r.value) break;
-        size += r.value.length;
-        if (size > maxBytes) { await reader.cancel(); throw new FetchError("too_large"); }
-        chunks.push(r.value);
-      }
-    }
-    return { status: res.status, url: current.toString(), headers: res.headers, text: Buffer.concat(chunks).toString("utf8") };
+    return { status: res.status, url: current.toString(), headers: res.headers, text: res.body.toString("utf8") };
   }
 }

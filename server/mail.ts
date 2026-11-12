@@ -68,12 +68,14 @@ export interface MeetingMailInput {
   gcalUrl: string;
   ics: string;
   cancelled: boolean;
+  /** The set meeting was renamed or moved to another address. */
+  updated?: boolean;
 }
 
 export function meetingMail(m: MeetingMailInput): Mail {
   const when = fmtRange(m.start, m.end, m.tz, m.lang);
-  const subject = t(m.lang, m.cancelled ? "m_cancel_subject" : "m_confirm_subject", { title: m.title });
-  const lead = t(m.lang, m.cancelled ? "m_cancel_lead" : "m_confirm_lead");
+  const subject = t(m.lang, m.cancelled ? "m_cancel_subject" : m.updated ? "m_update_subject" : "m_confirm_subject", { title: m.title });
+  const lead = t(m.lang, m.cancelled ? "m_cancel_lead" : m.updated ? "m_update_lead" : "m_confirm_lead");
   const lines = [lead, "", m.title, `${t(m.lang, "m_when")}: ${when} (${m.tz})`];
   if (m.address) lines.push(`${t(m.lang, "m_where")}: ${m.address}`);
   lines.push("");

@@ -14,11 +14,12 @@ import type { Connection, Group, User } from "./db";
 import { clientIp, sameOrigin } from "./http";
 import { loginMail } from "./mail";
 import {
-  cancelMeeting, clearMarks, displayName, feedFor, groupState, join, meetingEvent, paint, propose,
+  cancelMeeting, clearMarks, displayName, feedFor, meetingChanged, groupState, join, meetingEvent, paint, propose,
   refreshGroupCalendars, removeMember, setMyCalendars, usedConnections, vote, withdraw, type Ctx, type Result, MAX_MEMBERS,
 } from "./meeting";
 import { buildEventIcs } from "./ics";
 import { RateLimiter } from "./rate-limit";
+import { DailyBudget } from "./budget";
 import * as V from "./views";
 
 export interface AppOptions extends Ctx {
@@ -48,10 +49,19 @@ const CSP = [
 
 const Email = z.string().trim().toLowerCase().max(254).pipe(z.email());
 
-/** Only local paths, so a crafted ?next= cannot send anyone to another site. */
+/** Only local paths, so a crafted ?next= cannot send anyone to another site (also "/\t/evil.com" and the like). */
 export function safeNext(next: unknown, fallback = "/"): string {
-  return typeof next === "string" && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : fallback;
+  if (typeof next !== "string" || !next.startsWith("/") || next.length > 500) return fallback;
+  if (/[\u0000-\u001f\u007f\\]/.test(next)) return fallback;
+  try {
+    const u = new URL(next, "http://same.invalid");
+    if (u.origin !== "http://same.invalid") return fallback;
+    return u.pathname + u.search + u.hash;
+  } catch { return fallback; }
 }
+
+/** One line of user text: control characters and runs of whitespace become single spaces. */
+const oneLine = (s: string, max: number) => s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 const safeBack = (b: unknown): string | undefined => (typeof b === "string" && /^\/groups\/[A-Za-z0-9_-]{1,40}$/.test(b) ? b : undefined);
 
 let zonesCache: string[] | null = null;
@@ -69,7 +79,10 @@ export function createApp(o: AppOptions) {
   const cookieName = o.secureCookies ? "__Host-sid" : "sid";
   const ipLimiter = new RateLimiter(30, 60 * 60_000, now);
   const emailLimiter = new RateLimiter(5, 60 * 60_000, now);
+  const inviteLimiter = new RateLimiter(30, 60 * 60_000, now); // sign-up mails through one invitation
+  const loginMails = new DailyBudget(150, now); // all login mails: the relay's daily quota is shared
   const connectLimiter = new RateLimiter(20, 60 * 60_000, now);
+  const syncLimiter = new RateLimiter(30, 60 * 60_000, now); // manual refreshes per user
 
   const assetVersion = o.revision.slice(0, 12);
   const asset = (name: string) => `/static/${name}?v=${assetVersion}`;
@@ -188,7 +201,8 @@ export function createApp(o: AppOptions) {
     const existing = store.getUserByEmail(email);
     const group = invite ? store.getGroupByInvite(invite) : null;
     const codeOk = !!code && !!o.signupCode && safeEqual(code, o.signupCode);
-    if (existing || group || codeOk) {
+    const allowed = existing || ((group || codeOk) && (!group || inviteLimiter.allow(group.id)));
+    if (allowed && loginMails.take()) {
       const token = newToken();
       store.createLoginToken({
         hash: sha256(token), email, invite: group?.invite ?? null, signup: !existing && (codeOk || !!group),
@@ -247,7 +261,7 @@ export function createApp(o: AppOptions) {
   });
 
   const saveProfile = (u: User, f: Record<string, string | string[]>) => {
-    const name = str(f.name).trim().replace(/\s+/g, " ").slice(0, 60);
+    const name = oneLine(str(f.name), 60);
     const tz = str(f.tz);
     const lang = str(f.lang);
     store.updateUser(u.id, { name: name || u.name, tz: isValidTz(tz) ? tz : u.tz, lang: isLang(lang) ? lang : u.lang });
@@ -288,7 +302,7 @@ export function createApp(o: AppOptions) {
 
   const cancelIfUpcoming = (g: Group) => {
     const p = g.confirmedId ? store.getProposal(g.confirmedId) : null;
-    if (p && p.end > now()) cancelMeeting(o, g, g.organizerId);
+    if (p && p.end > now()) cancelMeeting(o, g, g.organizerId, true);
   };
 
   /* ---------- groups: pages ---------- */
@@ -297,9 +311,9 @@ export function createApp(o: AppOptions) {
   const parseGroupForm = (f: Record<string, string | string[]>, tzFixed?: string): Parsed | { ok: false; error: string; v: V.GroupFormValues } => {
     const num = (k: string) => Math.max(0, Math.floor(Number(str(f[k])) || 0));
     const v: V.GroupFormValues = {
-      title: str(f.title).trim().replace(/\s+/g, " ").slice(0, 120),
+      title: oneLine(str(f.title), 120),
       days: num("days"), hours: num("hours"), minutes: num("minutes"),
-      rangeStart: str(f.rangeStart), rangeEnd: str(f.rangeEnd), address: str(f.address).trim().slice(0, 300),
+      rangeStart: str(f.rangeStart), rangeEnd: str(f.rangeEnd), address: oneLine(str(f.address), 300),
       expiresOn: str(f.expiresOn), tz: tzFixed ?? str(f.tz),
     };
     const bad = (error: string) => ({ ok: false as const, error, v });
@@ -351,6 +365,8 @@ export function createApp(o: AppOptions) {
     if (!c.var.user) return c.redirect(`/login?next=${encodeURIComponent(c.req.path)}`, 303);
     const mg = memberGroup(c);
     if (!mg) return notFound(c);
+    // Others see a member by name; without one they would see "Member N".
+    if (!mg.u.name) return c.redirect(`/welcome?next=${encodeURIComponent(c.req.path)}`, 303);
     refreshGroupCalendars(o, mg.g);
     return render(c, <V.GroupPage {...base(c)} title={mg.g.title} boot={{ state: groupState(o, mg.g, mg.u), zones: zones() }} />);
   });
@@ -371,11 +387,18 @@ export function createApp(o: AppOptions) {
     if (!mg || mg.g.organizerId !== mg.u.id) return notFound(c);
     const r = parseGroupForm(await form(c), mg.g.tz);
     if (!r.ok) return render(c, <V.GroupFormPage {...base(c)} mode="edit" groupId={mg.g.id} v={r.v} error={r.error} zones={zones()} now={now()} />, 400);
-    store.updateGroup(mg.g.id, {
+    const g = mg.g;
+    const timing = r.durationMin !== g.durationMin || r.v.rangeStart !== g.rangeStart || r.v.rangeEnd !== g.rangeEnd;
+    if (g.confirmedId && timing) {
+      return render(c, <V.GroupFormPage {...base(c)} mode="edit" groupId={g.id} v={r.v} error="err_confirmed_locked" zones={zones()} now={now()} />, 409);
+    }
+    store.updateGroup(g.id, {
       title: r.v.title, address: r.v.address, durationMin: r.durationMin, rangeStart: r.v.rangeStart, rangeEnd: r.v.rangeEnd,
       expiresOn: r.v.expiresOn, expiresAt: r.expiresAt,
     });
-    return c.redirect(`/groups/${mg.g.id}`, 303);
+    if (r.durationMin !== g.durationMin) store.resizeOpenProposals(g.id, r.durationMin * 60_000);
+    if (g.confirmedId && (r.v.title !== g.title || r.v.address !== g.address)) meetingChanged(o, g.id);
+    return c.redirect(`/groups/${g.id}`, 303);
   });
 
   app.post("/groups/:id/delete", (c) => {
@@ -406,7 +429,7 @@ export function createApp(o: AppOptions) {
     const organizer = store.getUser(g.organizerId);
     const members = store.countMembers(g.id);
     return (
-      <V.InvitePage {...base(c)} group={g} organizer={organizer ? displayName(organizer) : "?"} members={members}
+      <V.InvitePage {...base(c)} group={g} organizer={organizer ? displayName(organizer, c.var.lang, 1) : "?"} members={members}
         isMember={false} full={members >= MAX_MEMBERS} email={email} error={error} />
     );
   };
@@ -526,7 +549,7 @@ export function createApp(o: AppOptions) {
     const mg = apiGroup(c);
     if (!mg) return c.json({ error: "not_found" }, 404);
     const m = store.getMember(mg.g.id, mg.u.id)!;
-    o.syncer.kick(usedConnections(m, store.connectionsOfUser(mg.u.id)), 30_000);
+    if (syncLimiter.allow(mg.u.id)) o.syncer.kick(usedConnections(m, store.connectionsOfUser(mg.u.id)), 60_000);
     return reply(c, mg, { ok: true });
   });
 
@@ -640,8 +663,8 @@ export function createApp(o: AppOptions) {
       const s = o.sealer.open<OAuthSecret>(secret);
       secret = o.sealer.seal({ ...s, calendars: s.calendars.map((x) => ({ ...x, selected: picked.has(x.id) })) });
     }
-    store.updateConnection(oc.conn.id, { label, secret, syncedAt: null });
-    void o.syncer.sync(oc.conn.id);
+    store.updateConnection(oc.conn.id, { label, secret });
+    if (syncLimiter.allow(oc.u.id)) void o.syncer.sync(oc.conn.id);
     const back = safeBack(c.req.query("back"));
     return c.redirect(`/calendars/${oc.conn.id}?saved=1${back ? `&back=${encodeURIComponent(back)}` : ""}`, 303);
   });
@@ -657,6 +680,7 @@ export function createApp(o: AppOptions) {
   app.post("/calendars/:id/sync", async (c) => {
     const oc = ownConnection(c);
     if (!oc) return notFound(c);
+    if (!syncLimiter.allow(oc.u.id)) return calendarsPage(c, oc.u, { error: "rate" }, 429);
     await Promise.race([o.syncer.sync(oc.conn.id), new Promise((r) => setTimeout(r, 15_000))]);
     const back = safeBack(c.req.query("back"));
     return c.redirect(`/calendars${back ? `?back=${encodeURIComponent(back)}` : ""}`, 303);

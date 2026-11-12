@@ -65,7 +65,7 @@ async function api(method: string, path: string, body?: unknown): Promise<boolea
     });
     const j = await r.json().catch(() => ({})) as { changed?: boolean; state?: GroupState; gone?: boolean; error?: string };
     if (j.gone) { location.href = "/"; return false; }
-    if (!r.ok) { toast(tr("g_error")); return false; }
+    if (!r.ok) { toast(j.error === "too_many_changes" ? tr("g_too_many") : tr("g_error")); return false; }
     if (j.state) setState(j.state);
     return true;
   } catch {
@@ -243,14 +243,15 @@ function membersCard(): HTMLElement {
   return h("section", { class: "card" },
     h("h3", {}, tr("g_members"), ` · ${S.members.length}`),
     h("ul", { class: "members" }, S.members.map((m) => {
-      const status = m.hasCalendars ? tr("g_m_calendar") : m.responded ? tr("g_m_manual") : tr("g_m_pending");
+      const status = m.calendarProblem ? tr("g_m_cal_problem") : m.hasCalendars ? tr("g_m_calendar")
+        : m.calendarSyncing ? tr("g_m_cal_syncing") : m.responded ? tr("g_m_manual") : tr("g_m_pending");
       return h("li", {},
         h("div", {},
           h("span", { class: "name" }, m.name),
           m.id === S.me.id ? h("span", { class: "chip" }, tr("g_m_you")) : null,
           m.isOrganizer ? h("span", { class: "chip" }, tr("g_m_org")) : null),
         h("div", { class: "muted small" },
-          h("span", { class: `dot ${m.responded ? "ok" : "wait"}` }), status,
+          h("span", { class: `dot ${m.calendarProblem ? "bad" : m.responded ? "ok" : "wait"}` }), status,
           m.tz !== S.me.tz ? ` · ${fmtTz(m.tz, S.now)}, ${tr("g_m_local", { time: fmtTime(Date.now(), m.tz, L) })}` : ""),
         isOrg() && m.id !== S.me.id ? h("button", { class: "link small", onclick: () => { if (confirm(tr("g_m_remove_confirm", { name: m.name }))) void api("POST", `/members/${m.id}/remove`); } }, tr("g_m_remove")) : null);
     })),

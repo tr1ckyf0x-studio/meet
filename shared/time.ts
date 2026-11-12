@@ -30,8 +30,23 @@ export function zonedParts(ms: number, tz: string): Parts {
   return { y: +p.year!, m: +p.month!, d: +p.day!, hh: +p.hour! % 24, mm: +p.minute!, wd: WD[p.weekday!] ?? 0 };
 }
 
+// Offsets change only on quarter-hour boundaries of UTC (every zone's offset and transition time is a multiple of
+// 15 minutes), so one lookup per zone and quarter hour is enough. Bounded, cleared when full.
+const offCache = new Map<string, number>();
+const QUARTER = 15 * 60_000;
+
 /** Offset of the zone from UTC at an instant, in ms (positive east of Greenwich). */
 export function tzOffset(ms: number, tz: string): number {
+  const key = tz + "|" + Math.floor(ms / QUARTER);
+  const hit = offCache.get(key);
+  if (hit !== undefined) return hit;
+  const off = computeOffset(ms, tz);
+  if (offCache.size > 50_000) offCache.clear();
+  offCache.set(key, off);
+  return off;
+}
+
+function computeOffset(ms: number, tz: string): number {
   const t = Math.floor(ms / 1000) * 1000;
   const p: Record<string, string> = {};
   for (const x of fmt(tz).formatToParts(new Date(t))) p[x.type] = x.value;

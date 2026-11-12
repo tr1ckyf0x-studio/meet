@@ -403,6 +403,12 @@ export class Store {
     return (this.db.query("SELECT * FROM proposals WHERE group_id = ? ORDER BY start_at, created_at").all(groupId) as Row[]).map(toProposal);
   }
 
+  /** Open proposals keep their start and take the meeting's new duration. */
+  resizeOpenProposals(groupId: string, durationMs: number): void {
+    this.db.query("UPDATE proposals SET end_at = start_at + ? WHERE group_id = ? AND status = 'open'").run(durationMs, groupId);
+    this.bumpRev(groupId);
+  }
+
   setProposalStatus(id: string, status: ProposalStatus): void {
     const r = this.db.query("UPDATE proposals SET status = ? WHERE id = ? RETURNING group_id").get(status, id) as { group_id: string } | null;
     if (r) this.bumpRev(r.group_id);

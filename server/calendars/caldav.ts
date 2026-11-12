@@ -1,7 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { normalize, type Iv } from "../../shared/intervals";
 import { FetchError, safeFetch, sameSite, type GuardOptions } from "./fetchguard";
-import { busyFromIcs } from "./parse";
+import { busyFromIcs, CalendarTooComplex, newBudget } from "./parse";
 import { icsDate } from "../ics";
 
 // A small CalDAV client: discovery (RFC 6764/4791) and a time-range calendar-query. Works with iCloud,
@@ -133,7 +133,7 @@ export async function discoverCalendars(url: string, username: string, password:
   for (const home of homes) {
     const r = await dav.request("PROPFIND", home, "1", LIST);
     const cals = listCalendars(r.url, r.responses, new URL(home).toString());
-    if (cals.length) return cals;
+    if (cals.length) return cals.slice(0, 50);
   }
   // The URL may be a single calendar collection.
   const r = await dav.request("PROPFIND", url, "0", LIST);
@@ -152,12 +152,16 @@ function queryBody(lo: number, hi: number): string {
 export async function caldavBusy(secret: CaldavSecret, lo: number, hi: number, tz: string, guard: GuardOptions): Promise<Iv[]> {
   const dav = new DavClient(new URL(secret.url), secret.username, secret.password, guard);
   const out: Iv[] = [];
+  const budget = newBudget();
   for (const cal of secret.calendars.filter((c) => c.selected)) {
     const r = await dav.request("REPORT", cal.href, "1", queryBody(lo, hi));
     for (const x of r.responses) {
       const data = text(x.props["calendar-data"]);
       if (!data.includes("BEGIN:VCALENDAR")) continue;
-      try { out.push(...busyFromIcs(data, lo, hi, tz)); } catch { /* one broken event does not spoil the rest */ }
+      try { out.push(...busyFromIcs(data, lo, hi, tz, budget)); } catch (e) {
+        if (e instanceof CalendarTooComplex) throw new FetchError("too_large");
+        /* one broken event does not spoil the rest */
+      }
     }
   }
   return normalize(out);

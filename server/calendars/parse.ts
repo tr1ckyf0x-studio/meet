@@ -5,7 +5,16 @@ import { DAY, isValidTz, zonedToUtc } from "../../shared/time";
 // iCalendar text -> busy intervals. Only start and end survive; titles, descriptions, attendees and
 // locations are read by the parser in memory and dropped with it.
 
-const MAX_OCCURRENCES = 20_000;
+const MAX_OCCURRENCES = 20_000; // per series
+const MAX_STEPS = 300_000; // per sync, all series together: a crafted feed must not freeze the server
+const MAX_EVENTS = 50_000;
+
+/** Thrown when a feed needs more work than any real calendar does. */
+export class CalendarTooComplex extends Error {}
+
+/** Work allowed for one sync; shared by all documents of a CalDAV calendar. */
+export interface Budget { steps: number; events: number }
+export const newBudget = (): Budget => ({ steps: 0, events: 0 });
 
 /** Windows zone names Outlook/Exchange put into TZID, mapped to IANA. */
 const WINDOWS_TZ: Record<string, string> = {
@@ -77,7 +86,7 @@ function span(ev: ICAL.Event, start: ITime, end: ITime | null, userTz: string): 
 }
 
 /** Busy intervals inside [lo, hi) from one iCalendar document (one or more VCALENDARs). */
-export function busyFromIcs(text: string, lo: number, hi: number, userTz: string): Iv[] {
+export function busyFromIcs(text: string, lo: number, hi: number, userTz: string, budget: Budget = newBudget()): Iv[] {
   const parsed = ICAL.parse(text) as unknown;
   const roots = (Array.isArray(parsed) && typeof parsed[0] !== "string" ? parsed : [parsed]) as unknown[];
   const out: Iv[] = [];
@@ -95,6 +104,7 @@ export function busyFromIcs(text: string, lo: number, hi: number, userTz: string
       }
       const byUid = new Map<string, { master?: ICAL.Component; exceptions: ICAL.Component[] }>();
       for (const ve of cal.getAllSubcomponents("vevent")) {
+        if (++budget.events > MAX_EVENTS) throw new CalendarTooComplex("too many events");
         const uid = String(ve.getFirstPropertyValue("uid") ?? Math.random());
         const entry = byUid.get(uid) ?? { exceptions: [] };
         if (ve.hasProperty("recurrence-id")) entry.exceptions.push(ve); else entry.master = ve;
@@ -120,11 +130,18 @@ export function busyFromIcs(text: string, lo: number, hi: number, userTz: string
           if (iv) out.push(iv);
           continue;
         }
+        // Sub-hourly repetition is not a calendar anyone keeps; it is a way to burn CPU.
+        const freq = String((master.getFirstPropertyValue("rrule") as { freq?: string } | null)?.freq ?? "").toUpperCase();
+        if (freq === "SECONDLY" || freq === "MINUTELY") continue;
         const it = ev.iterator();
         const startTz = tzidOf(ev, "dtstart");
         // Exceptions can move an instance up to a week later; keep iterating a bit past the window.
         const stopAt = hi + 7 * DAY;
+        // Wall time is within ±14 h of UTC, so anything this far before the window can be skipped without Intl.
+        const skipBefore = lo - 3 * DAY;
         for (let n = 0, next = it.next(); next && n < MAX_OCCURRENCES; n++, next = it.next()) {
+          if (++budget.steps > MAX_STEPS) throw new CalendarTooComplex("too many occurrences");
+          if (Date.UTC(next.year, next.month - 1, next.day, next.hour, next.minute) < skipBefore) continue;
           if (toMs(next, startTz, userTz) >= stopAt) break;
           const d = ev.getOccurrenceDetails(next);
           if (!isBusy(d.item)) continue;

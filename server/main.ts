@@ -6,6 +6,7 @@ import { loadKey, Sealer } from "./crypto";
 import { Store } from "./db";
 import { MemoryMailer, SmtpMailer, type Mailer } from "./mail";
 import type { OAuthApp, Provider } from "./calendars/oauth";
+import { defaultLimits } from "./meeting";
 
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d;
@@ -22,11 +23,12 @@ const store = new Store(join(dataDir, "meet.sqlite"));
 const sealer = new Sealer(loadKey(join(dataDir, "secret.key")));
 const now = () => Date.now();
 
+const mailFrom = env("MAIL_FROM", "meet <noreply@mail.tr1ckyf0x.dev>");
 let mailer: Mailer;
 if (opt("SMTP_HOST")) {
   mailer = new SmtpMailer({
     host: env("SMTP_HOST"), port: Number(env("SMTP_PORT", "587")), user: env("SMTP_USER"), pass: env("SMTP_PASS"),
-    from: env("MAIL_FROM", "meet <noreply@mail.tr1ckyf0x.dev>"),
+    from: mailFrom,
   });
 } else {
   log("SMTP_HOST is not set: emails are printed to the log (development only)");
@@ -40,7 +42,12 @@ for (const p of ["google", "microsoft"] as const) {
 }
 log(`calendar providers: CalDAV, ICS${apps.google ? ", Google" : ""}${apps.microsoft ? ", Microsoft" : ""}`);
 
-const guard = { allowPrivate: opt("ALLOW_PRIVATE_URLS") === "true" };
+const list = (k: string) => (opt(k) ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+const guard = {
+  allowPrivate: opt("ALLOW_PRIVATE_URLS") === "true",
+  denySuffixes: list("FETCH_DENY_SUFFIXES"),
+  denyAddressesOf: list("FETCH_DENY_ADDRESSES_OF"),
+};
 const syncer = new Syncer({ store, sealer, guard, apps, now, log });
 
 /** Static files plus the browser bundles, built once at start. */
@@ -60,7 +67,8 @@ async function loadAssets(): Promise<Map<string, [string, Uint8Array | string]>>
 }
 
 const app = createApp({
-  store, sealer, mailer, syncer, publicUrl, now, log, apps, guard,
+  store, sealer, mailer, syncer, publicUrl, now, log, apps, guard, ...defaultLimits(now),
+  organizerEmail: /<([^>]+)>/.exec(mailFrom)?.[1] ?? mailFrom,
   signupCode: opt("SIGNUP_CODE") ?? "",
   secureCookies: env("SECURE_COOKIES", "true") === "true",
   revision: process.env.REVISION ?? "dev",

@@ -218,6 +218,7 @@ details.provider[open] > summary { margin-bottom: .8rem; }
 .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; margin-right: .4rem; background: var(--muted); vertical-align: middle; }
 .dot.ok { background: var(--lv6); }
 .dot.wait { background: var(--warn); }
+.dot.bad { background: var(--danger); }
 .my-cals li { display: flex; flex-direction: column; padding: .35rem 0; }
 .my-cals .check { overflow-wrap: anywhere; }
 .copy-row { display: flex; gap: .5rem; margin-bottom: .6rem; }

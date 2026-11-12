@@ -1,6 +1,6 @@
 import type { Iv } from "../../shared/intervals";
 import { FetchError, parseUserUrl, safeFetch, type GuardOptions } from "./fetchguard";
-import { busyFromIcs } from "./parse";
+import { busyFromIcs, CalendarTooComplex } from "./parse";
 
 export interface IcsSecret { url: string }
 
@@ -16,7 +16,7 @@ export async function icsBusy(secret: IcsSecret, lo: number, hi: number, tz: str
   if (!r.text.includes("BEGIN:VCALENDAR")) throw new FetchError("not_calendar");
   try {
     return busyFromIcs(r.text, lo, hi, tz);
-  } catch {
-    throw new FetchError("bad_calendar");
+  } catch (e) {
+    throw new FetchError(e instanceof CalendarTooComplex ? "too_large" : "bad_calendar");
   }
 }

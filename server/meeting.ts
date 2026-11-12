@@ -1,5 +1,7 @@
 import { applyStroke, type Iv, type Mark } from "../shared/intervals";
-import type { Lang } from "../shared/i18n";
+import { t, type Lang } from "../shared/i18n";
+import { DailyBudget } from "./budget";
+import { RateLimiter } from "./rate-limit";
 import { addDays, DAY, MIN, startOfDay } from "../shared/time";
 import { memberUnavailable, suggest, type Suggestions } from "./availability";
 import type { Syncer } from "./calendars/sync";
@@ -15,6 +17,16 @@ export interface Ctx {
   publicUrl: string;
   now: () => number;
   log: (msg: string) => void;
+  /** The address invitations name as ORGANIZER (the sender). */
+  organizerEmail?: string;
+  /** Meeting emails per day, all groups together (the relay's quota is shared). */
+  meetingMails?: DailyBudget;
+  /** Cancellations per group per day, so propose-confirm-cancel cannot be looped into a mail flood. */
+  cancels?: RateLimiter;
+}
+
+export function defaultLimits(now: () => number) {
+  return { meetingMails: new DailyBudget(200, now), cancels: new RateLimiter(3, 86_400_000, now) };
 }
 
 export const MAX_MEMBERS = 50;
@@ -39,6 +51,8 @@ interface Computed {
   member: MemberView;
   conns: Connection[];
   used: Connection[];
+  /** Used calendars that synced fine; only these count as availability. */
+  working: Connection[];
   calendarBusy: Iv[];
   unavailable: Iv[];
   responded: boolean;
@@ -49,10 +63,13 @@ function compute(ctx: Ctx, g: Group, members: MemberView[]): Computed[] {
   return members.map((m) => {
     const conns = ctx.store.connectionsOfUser(m.userId);
     const used = usedConnections(m, conns);
-    const calendarBusy = ctx.store.busy(used.map((c) => c.id), lo, hi);
-    const hasCalendars = used.length > 0;
+    // A calendar that has not synced yet, or failed, says nothing: counting it would make its owner look
+    // free all the time.
+    const working = used.filter((c) => c.status === "ok");
+    const calendarBusy = ctx.store.busy(working.map((c) => c.id), lo, hi);
+    const hasCalendars = working.length > 0;
     return {
-      member: m, conns, used, calendarBusy,
+      member: m, conns, used, working, calendarBusy,
       unavailable: memberUnavailable({ lo, hi, hasCalendars, calendarBusy, marks: m.marks }),
       responded: hasCalendars || m.marks.length > 0,
     };
@@ -77,7 +94,10 @@ export interface GroupState {
     lo: number; hi: number; expiresOn: string; organizerId: string; inviteUrl: string; feedUrl: string;
     confirmedId: string | null;
   };
-  members: { id: string; name: string; tz: string; isOrganizer: boolean; responded: boolean; hasCalendars: boolean; unavailable: Iv[] }[];
+  members: {
+    id: string; name: string; tz: string; isOrganizer: boolean; responded: boolean; hasCalendars: boolean;
+    calendarProblem: boolean; calendarSyncing: boolean; unavailable: Iv[];
+  }[];
   mine: {
     marks: Mark[];
     calendarBusy: Iv[];
@@ -88,8 +108,9 @@ export interface GroupState {
   proposals: ProposalView[];
 }
 
-export function displayName(m: { name: string; email: string }): string {
-  return m.name.trim() || m.email.split("@")[0] || "?";
+/** A member's name as others see it. Never derived from the email address. */
+export function displayName(m: { name: string }, lang: Lang, n: number): string {
+  return m.name.trim() || t(lang, "member_n", { n });
 }
 
 /** Everything the group page shows to one member. Other members' busy time is merged and clipped to the range. */
@@ -102,15 +123,17 @@ export function groupState(ctx: Ctx, g: Group, viewer: User): GroupState {
   return {
     rev: g.rev,
     now: ctx.now(),
-    me: { id: viewer.id, isOrganizer: g.organizerId === viewer.id, tz: viewer.tz, lang: viewer.lang, name: displayName(viewer) },
+    me: { id: viewer.id, isOrganizer: g.organizerId === viewer.id, tz: viewer.tz, lang: viewer.lang, name: displayName(viewer, viewer.lang, computed.indexOf(me) + 1) },
     group: {
       id: g.id, title: g.title, address: g.address, durationMin: g.durationMin, rangeStart: g.rangeStart, rangeEnd: g.rangeEnd,
       tz: g.tz, lo, hi, expiresOn: g.expiresOn, organizerId: g.organizerId,
       inviteUrl: inviteUrl(ctx, g), feedUrl: feedUrl(ctx, me.member.feedToken), confirmedId: g.confirmedId,
     },
-    members: computed.map((c) => ({
-      id: c.member.userId, name: displayName(c.member), tz: c.member.tz, isOrganizer: c.member.userId === g.organizerId,
-      responded: c.responded, hasCalendars: c.used.length > 0, unavailable: c.unavailable,
+    members: computed.map((c, i) => ({
+      id: c.member.userId, name: displayName(c.member, viewer.lang, i + 1), tz: c.member.tz, isOrganizer: c.member.userId === g.organizerId,
+      responded: c.responded, hasCalendars: c.working.length > 0,
+      calendarProblem: c.used.some((x) => x.status === "error"), calendarSyncing: c.used.some((x) => x.status === "new"),
+      unavailable: c.unavailable,
     })),
     mine: {
       marks: me.member.marks,
@@ -247,12 +270,15 @@ export function evaluate(ctx: Ctx, groupId: string): void {
   sendMeetingMails(ctx, fresh, p, ctx.store.members(g.id), false);
 }
 
-export function cancelMeeting(ctx: Ctx, g: Group, actorId: string): Result {
+export function cancelMeeting(ctx: Ctx, g: Group, actorId: string, force = false): Result {
   if (actorId !== g.organizerId) return fail("forbidden", 403);
   if (!g.confirmedId) return fail("not_confirmed", 409);
+  if (!force && ctx.cancels && !ctx.cancels.allow(g.id)) return fail("too_many_changes", 429);
   const p = ctx.store.getProposal(g.confirmedId);
   ctx.store.tx(() => {
     if (p) ctx.store.setProposalStatus(p.id, "cancelled");
+    // Other proposals everyone had agreed to would otherwise set themselves on the next vote: start over.
+    for (const x of ctx.store.proposals(g.id)) if (x.status === "open") ctx.store.setProposalStatus(x.id, "withdrawn");
     ctx.store.setConfirmed(g.id, null);
   });
   const fresh = ctx.store.getGroup(g.id)!;
@@ -264,17 +290,31 @@ export function meetingEvent(ctx: Ctx, g: Group, p: Pick<Proposal, "start" | "en
   return {
     uid: `${g.id}@${host(ctx)}`, seq: g.seq, start: p.start, end: p.end, title: g.title,
     location: g.address || undefined, description: groupUrl(ctx, g), url: groupUrl(ctx, g), status,
+    organizer: ctx.organizerEmail ? { name: "meet", email: ctx.organizerEmail } : undefined,
   };
 }
 
-function sendMeetingMails(ctx: Ctx, g: Group, p: Proposal, to: MemberView[], cancelled: boolean): void {
+/** After the organizer renamed a set meeting or changed its address: a new SEQUENCE and the update to everyone. */
+export function meetingChanged(ctx: Ctx, groupId: string): void {
+  const g = ctx.store.getGroup(groupId);
+  const p = g?.confirmedId ? ctx.store.getProposal(g.confirmedId) : null;
+  if (!g || !p) return;
+  ctx.store.setConfirmed(g.id, p.id);
+  sendMeetingMails(ctx, ctx.store.getGroup(g.id)!, p, ctx.store.members(g.id), false, true);
+}
+
+function sendMeetingMails(ctx: Ctx, g: Group, p: Proposal, to: MemberView[], cancelled: boolean, updated = false): void {
+  if (ctx.meetingMails && !ctx.meetingMails.take(to.length)) {
+    ctx.log(`meeting mails of ${g.id} skipped: the daily mail budget is spent`);
+    return;
+  }
   const event = meetingEvent(ctx, g, p, cancelled ? "CANCELLED" : "CONFIRMED");
   const ics = buildEventIcs(event, cancelled ? "CANCEL" : "PUBLISH", ctx.now());
   const gcalUrl = googleCalendarLink({ title: g.title, start: p.start, end: p.end, location: g.address || undefined, details: groupUrl(ctx, g) });
   for (const m of to) {
     const mail = meetingMail({
       to: m.email, lang: m.lang, tz: m.tz, title: g.title, address: g.address, start: p.start, end: p.end,
-      pageUrl: groupUrl(ctx, g), gcalUrl, ics, cancelled,
+      pageUrl: groupUrl(ctx, g), gcalUrl, ics, cancelled, updated,
     });
     ctx.mailer.send(mail).catch((e) => ctx.log(`mail to member of ${g.id} failed: ${String((e as Error)?.message ?? e).slice(0, 200)}`));
   }

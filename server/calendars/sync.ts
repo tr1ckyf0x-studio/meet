@@ -95,7 +95,7 @@ export class Syncer {
           this.d.store.updateConnection(c.id, { secret: sealer.seal({ ...secret, refreshToken: t.refreshToken }) });
         }
         const ids = secret.calendars.filter((x) => x.selected).map((x) => x.id);
-        return providerBusy(c.kind, t.accessToken, ids, lo, hi, this.d.fetch);
+        return providerBusy(c.kind, t.accessToken, ids, lo, hi, this.d.fetch, tz);
       }
     }
   }

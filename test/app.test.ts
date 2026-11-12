@@ -1,72 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
-import { createApp } from "../server/app";
-import { Syncer } from "../server/calendars/sync";
-import { Sealer } from "../server/crypto";
-import { Store } from "../server/db";
-import { MemoryMailer } from "../server/mail";
 
-const ORIGIN = "https://meet.test";
-let clock = Date.UTC(2026, 10, 12, 10);
-
-function setup() {
-  const store = new Store(":memory:");
-  const sealer = new Sealer(randomBytes(32));
-  const mailer = new MemoryMailer();
-  const now = () => clock;
-  const syncer = new Syncer({ store, sealer, guard: {}, apps: {}, now });
-  const logs: string[] = [];
-  const app = createApp({
-    store, sealer, mailer, syncer, publicUrl: ORIGIN, now, log: (m) => logs.push(m), apps: {}, guard: {},
-    signupCode: "letmein", secureCookies: false, revision: "test", assets: new Map([["style.css", ["text/css", "x"]]]),
-  });
-  return { store, mailer, app, logs };
-}
-
-type App = ReturnType<typeof setup>["app"];
-
-class Browser {
-  cookie = "";
-  constructor(private readonly app: App) {}
-  async req(method: string, path: string, body?: Record<string, string> | object, json = false): Promise<Response> {
-    const headers: Record<string, string> = { origin: ORIGIN, host: "meet.test" };
-    if (this.cookie) headers.cookie = this.cookie;
-    let b: string | undefined;
-    if (body && json) { headers["content-type"] = "application/json"; b = JSON.stringify(body); }
-    else if (body) { headers["content-type"] = "application/x-www-form-urlencoded"; b = new URLSearchParams(body as Record<string, string>).toString(); }
-    const r = await this.app.request(`${ORIGIN}${path}`, { method, headers, body: b });
-    const set = r.headers.get("set-cookie");
-    if (set && /sid=/.test(set)) this.cookie = set.split(";")[0]!;
-    return r;
-  }
-  get(p: string) { return this.req("GET", p); }
-  post(p: string, body: Record<string, string> = {}) { return this.req("POST", p, body); }
-  api(method: string, p: string, body: object = {}) { return this.req(method, p, body, true); }
-}
-
-const linkFrom = (mailer: MemoryMailer) => /\/auth\?t=([\w-]+)/.exec(mailer.sent.at(-1)!.text)![1]!;
-
-async function signIn(env: ReturnType<typeof setup>, email: string, extra: Record<string, string>, name: string): Promise<Browser> {
-  const b = new Browser(env.app);
-  const before = env.mailer.sent.length;
-  await b.post("/login", { email, ...extra });
-  expect(env.mailer.sent.length).toBe(before + 1);
-  const r = await b.post("/auth", { t: linkFrom(env.mailer) });
-  expect(r.status).toBe(303);
-  if (r.headers.get("location")!.startsWith("/welcome")) {
-    const next = new URL(r.headers.get("location")!, ORIGIN).searchParams.get("next")!;
-    await b.post("/welcome", { name, tz: "Europe/Belgrade", lang: "ru", next });
-  }
-  return b;
-}
-
-async function createGroup(b: Browser, title = "Ужин"): Promise<string> {
-  const r = await b.post("/groups", {
-    title, days: "0", hours: "2", minutes: "0", rangeStart: "2026-11-13", rangeEnd: "2026-11-15", address: "Белград", expiresOn: "2026-11-20", tz: "Europe/Belgrade",
-  });
-  expect(r.status).toBe(303);
-  return r.headers.get("location")!.split("/").pop()!;
-}
+import { clock, ORIGIN, setup, Browser, linkFrom, signIn, createGroup, setClock } from "./helpers";
 
 describe("auth", () => {
   test("no account and no invitation: same answer, no email", async () => {
@@ -94,9 +28,9 @@ describe("auth", () => {
     const b = new Browser(env.app);
     await b.post("/login", { email: "a@example.com", code: "letmein" });
     const token = linkFrom(env.mailer);
-    clock += 16 * 60_000;
+    setClock(clock() + 16 * 60_000);
     expect((await b.post("/auth", { t: token })).status).toBe(400);
-    clock -= 16 * 60_000;
+    setClock(clock() - 16 * 60_000);
   });
 
   test("a wrong sign-up code sends nothing", async () => {
@@ -209,10 +143,10 @@ describe("groups", () => {
     const env = setup();
     const anna = await signIn(env, "anna@example.com", { code: "letmein" }, "Аня");
     const gid = await createGroup(anna);
-    clock = Date.UTC(2026, 10, 21, 0);
+    setClock(Date.UTC(2026, 10, 21, 0));
     expect((await anna.get(`/api/groups/${gid}`)).status).toBe(404);
-    env.store.sweep(clock);
+    env.store.sweep(clock());
     expect(env.store.getGroup(gid)).toBeNull();
-    clock = Date.UTC(2026, 10, 12, 10);
+    setClock(Date.UTC(2026, 10, 12, 10));
   });
 });

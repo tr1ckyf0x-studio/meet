@@ -10,13 +10,17 @@ export interface IcsEvent {
   description?: string;
   url?: string;
   status: "CONFIRMED" | "TENTATIVE" | "CANCELLED";
+  organizer?: { name: string; email: string };
 }
 
 const enc = new TextEncoder();
 
 /** Escapes TEXT values (RFC 5545 3.3.11). */
 export function escapeText(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  return s
+    .replace(/\r\n|\r|\n/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "") // other control characters have no place in a value
+    .replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
 }
 
 /** Folds a content line at 75 octets without splitting a UTF-8 character. */
@@ -56,6 +60,7 @@ function eventLines(e: IcsEvent, now: number): string[] {
   if (e.location) lines.push(`LOCATION:${escapeText(e.location)}`);
   if (e.description) lines.push(`DESCRIPTION:${escapeText(e.description)}`);
   if (e.url) lines.push(`URL:${e.url}`);
+  if (e.organizer) lines.push(`ORGANIZER;CN=${e.organizer.name.replace(/[";:,\r\n]/g, "")}:mailto:${e.organizer.email}`);
   lines.push(`STATUS:${e.status}`, `TRANSP:${e.status === "TENTATIVE" ? "TRANSPARENT" : "OPAQUE"}`, "END:VEVENT");
   return lines;
 }

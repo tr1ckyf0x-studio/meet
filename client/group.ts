@@ -1,4 +1,5 @@
-import { fmtAgo, fmtDay, fmtDuration, fmtRange, fmtTime, fmtTz, fmtYmd } from "../shared/format";
+import { fmtAgo, fmtDay, fmtDuration, fmtRange, fmtTime, fmtTz, fmtYmd, fmtYmdRange } from "../shared/format";
+import { ICONS, type IconName } from "../shared/icons";
 import { errText, t, type Key, type Lang } from "../shared/i18n";
 import { applyStroke, type Iv, type Mark } from "../shared/intervals";
 import { addDays, MIN, parseYmd, ymdOf, zonedToUtc } from "../shared/time";
@@ -39,6 +40,13 @@ function h(tag: string, attrs: Attrs = {}, ...kids: Kid[]): HTMLElement {
   };
   kids.forEach(add);
   return el;
+}
+
+function icon(n: IconName): HTMLElement {
+  const s = document.createElement("span");
+  s.className = "icon";
+  s.innerHTML = ICONS[n]; // constant markup from our own bundle
+  return s;
 }
 
 function toast(msg: string) {
@@ -119,9 +127,8 @@ function header(): HTMLElement {
       h("h1", {}, g.title),
       isOrg() ? h("a", { class: "button small", href: `/groups/${g.id}/edit` }, tr("g_edit")) : null),
     h("p", { class: "meta" },
-      h("span", {}, tr("g_dates", { from: fmtYmd(g.rangeStart, L), to: fmtYmd(g.rangeEnd, L) })),
-      h("span", {}, tr("g_duration", { d: fmtDuration(g.durationMin, L) })),
-      g.address ? h("span", {}, "📍 ", g.address, " ",
+      h("span", {}, icon("clock"), " ", fmtYmdRange(g.rangeStart, g.rangeEnd, L), " · ", fmtDuration(g.durationMin, L)),
+      g.address ? h("span", {}, icon("pin"), " ", g.address, " ",
         h("a", { href: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(g.address)}`, target: "_blank", rel: "noopener" }, tr("g_maps"))) : null),
   );
 }
@@ -132,7 +139,7 @@ function confirmedCard(): HTMLElement | null {
   const gcal = new URLSearchParams({ action: "TEMPLATE", text: S.group.title, dates: `${icsDate(p.start)}/${icsDate(p.end)}` });
   if (S.group.address) gcal.set("location", S.group.address);
   return h("section", { class: "card confirmed" },
-    h("p", { class: "eyebrow" }, "✅ ", tr("g_confirmed")),
+    h("p", { class: "eyebrow ok" }, icon("check"), " ", tr("g_confirmed")),
     h("h2", {}, fmtRange(p.start, p.end, viewTz, L)),
     localTimesFor(p.start),
     h("p", { class: "muted small" }, tr("g_mail_note")),
@@ -387,8 +394,9 @@ function gridCard(): HTMLElement {
   days.forEach((d) => {
     const p = parseYmd(d)!;
     const noon = zonedToUtc(p.y, p.m, p.d, 12, 0, viewTz);
-    const [wd, ...rest] = fmtDay(noon, viewTz, L).split(/,?\s+/);
-    grid.append(h("div", { class: "day-head" }, h("span", {}, wd ?? ""), h("b", {}, rest.join(" "))));
+    const parts = new Intl.DateTimeFormat(L === "ru" ? "ru-RU" : "en-GB", { timeZone: viewTz, weekday: "short", day: "numeric", month: "short" }).formatToParts(noon);
+    const part = (k: string) => parts.find((x) => x.type === k)?.value ?? "";
+    grid.append(h("div", { class: "day-head" }, h("span", { class: "wd" }, part("weekday").replace(".", "")), h("b", {}, part("day")), h("span", {}, part("month").replace(".", ""))));
   });
   cellEls = [];
   const cellNodes: HTMLElement[][] = days.map(() => []);

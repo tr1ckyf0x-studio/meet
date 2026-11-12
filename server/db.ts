@@ -355,7 +355,7 @@ export class Store {
 
   members(groupId: string): MemberView[] {
     const rows = this.db.query(`SELECT m.*, u.name, u.email, u.tz, u.lang FROM members m JOIN users u ON u.id = m.user_id
-      WHERE m.group_id = ? ORDER BY m.joined_at`).all(groupId) as Row[];
+      WHERE m.group_id = ? ORDER BY m.joined_at, m.rowid`).all(groupId) as Row[];
     return rows.map((r) => ({ ...toMember(r), name: r.name as string, email: r.email as string, tz: r.tz as string, lang: r.lang === "ru" ? "ru" : "en" }));
   }
 

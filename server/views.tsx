@@ -1,6 +1,7 @@
 /** @jsxImportSource hono/jsx */
 import type { Child } from "hono/jsx";
-import { fmtAgo, fmtTz, fmtYmd } from "../shared/format";
+import { fmtAgo, fmtTz, fmtYmd, fmtYmdRange } from "../shared/format";
+import { ICONS, type IconName } from "../shared/icons";
 import { errText, t, type Key, type Lang } from "../shared/i18n";
 import type { Connection, Group, User } from "./db";
 
@@ -8,6 +9,8 @@ import type { Connection, Group, User } from "./db";
 // /static/common.js (all pages) and /static/group.js (the group page).
 
 export const SOURCE_URL = "https://github.com/tr1ckyf0x-studio/meet";
+
+export const Icon = ({ n }: { n: IconName }) => <span class="icon" dangerouslySetInnerHTML={{ __html: ICONS[n] }}></span>;
 
 interface Base { lang: Lang; user: User | null; asset: (name: string) => string }
 
@@ -67,7 +70,7 @@ export function Landing(p: Base) {
           <li>{t(L, "landing_s2")}</li>
           <li>{t(L, "landing_s3")}</li>
         </ol>
-        <p class="note">🔒 {t(L, "landing_privacy")}</p>
+        <p class="note"><Icon n="lock" /> {t(L, "landing_privacy")}</p>
       </section>
       <section class="card narrow">
         <h2>{t(L, "login_title")}</h2>
@@ -136,7 +139,7 @@ export function SentPage(p: Base & { email: string }) {
   return (
     <Layout {...p} title={t(p.lang, "login_sent_title")}>
       <section class="card narrow center">
-        <div class="big-icon">✉️</div>
+        <div class="big-icon"><Icon n="mail" /></div>
         <h1>{t(p.lang, "login_sent_title")}</h1>
         <p>{t(p.lang, "login_sent_text", { email: p.email })}</p>
         <p class="muted small">{t(p.lang, "login_sent_spam")}</p>
@@ -194,7 +197,7 @@ export function HomePage(p: Base & { user: User; groups: (Group & { memberCount:
     <Layout {...p} title={t(L, "home_title")}>
       <div class="row-between">
         <h1>{t(L, "home_title")}</h1>
-        <a class="button primary" href="/groups/new">＋ {t(L, "home_new")}</a>
+        <a class="button primary" href="/groups/new"><Icon n="plus" /> {t(L, "home_new")}</a>
       </div>
       {p.groups.length === 0 ? <section class="card empty"><p>{t(L, "home_empty")}</p></section> : (
         <ul class="group-list">
@@ -203,7 +206,7 @@ export function HomePage(p: Base & { user: User; groups: (Group & { memberCount:
               <a class="card group-item" href={`/groups/${g.id}`}>
                 <span class="title">{g.title}</span>
                 <span class="meta">
-                  {fmtYmd(g.rangeStart, L)} — {fmtYmd(g.rangeEnd, L)} · {t(L, "home_members", { n: g.memberCount })}
+                  {fmtYmdRange(g.rangeStart, g.rangeEnd, L)} · {t(L, "home_members", { n: g.memberCount })}
                 </span>
                 <span class={`chip ${g.confirmedId ? "ok" : ""}`}>{t(L, g.confirmedId ? "home_confirmed" : "home_searching")}</span>
               </a>
@@ -271,7 +274,7 @@ export function InvitePage(p: Base & { group: Group; organizer: string; members:
         <p class="eyebrow">{t(L, "invite_title")}</p>
         <h1>{g.title}</h1>
         <p class="muted">{t(L, "invite_by", { name: p.organizer })}</p>
-        <p>{t(L, "invite_when", { range: `${fmtYmd(g.rangeStart, L)} — ${fmtYmd(g.rangeEnd, L)}` })}</p>
+        <p>{t(L, "invite_when", { range: fmtYmdRange(g.rangeStart, g.rangeEnd, L) })}</p>
         <p class="muted">{t(L, "invite_members", { n: p.members })}</p>
         {p.full ? <p class="error">{t(L, "invite_full")}</p> : p.user ? (
           <form method="post" action={`/g/${g.invite}/join`}><button class="primary big">{t(L, "invite_join")}</button></form>
@@ -302,7 +305,9 @@ function connStatus(L: Lang, c: Connection, now: number): string {
   return t(L, "cal_status_ok", { ago: fmtAgo(c.syncedAt, now, L) });
 }
 
-const KIND_ICON: Record<string, string> = { google: "G", microsoft: "O", caldav: "☁", ics: "🔗" };
+const Kind = ({ k }: { k: string }) => (
+  <span class={`kind kind-${k}`}>{k === "google" ? "G" : k === "microsoft" ? "O" : <Icon n={k === "ics" ? "link" : "cloud"} />}</span>
+);
 
 export function CalendarsPage(p: Base & { conns: Connection[]; providers: { google: boolean; microsoft: boolean }; back?: string; flash?: string | null; error?: string | null; now: number }) {
   const L = p.lang;
@@ -319,7 +324,7 @@ export function CalendarsPage(p: Base & { conns: Connection[]; providers: { goog
           <ul class="conn-list">
             {p.conns.map((c) => (
               <li class={`conn ${c.status}`}>
-                <span class={`kind kind-${c.kind}`}>{KIND_ICON[c.kind]}</span>
+                <Kind k={c.kind} />
                 <a href={`/calendars/${c.id}${back}`} class="label">{c.label}</a>
                 <span class="status">{connStatus(L, c, p.now)}</span>
                 <form method="post" action={`/calendars/${c.id}/sync${back}`} class="inline"><button class="small">{t(L, "cal_sync")}</button></form>
@@ -332,16 +337,16 @@ export function CalendarsPage(p: Base & { conns: Connection[]; providers: { goog
       <h2>{t(L, "cal_add")}</h2>
       <div class="providers">
         <div class="card provider">
-          <h3><span class="kind kind-google">G</span> {t(L, "cal_google")}</h3>
+          <h3><Kind k="google" /> {t(L, "cal_google")}</h3>
           {p.providers.google ? <a class="button primary" href={`/oauth/google/start${back}`}>{t(L, "cal_connect")}</a> : <span class="chip">{t(L, "cal_soon")}</span>}
         </div>
         <div class="card provider">
-          <h3><span class="kind kind-microsoft">O</span> {t(L, "cal_microsoft")}</h3>
+          <h3><Kind k="microsoft" /> {t(L, "cal_microsoft")}</h3>
           {p.providers.microsoft ? <a class="button primary" href={`/oauth/microsoft/start${back}`}>{t(L, "cal_connect")}</a> : <span class="chip">{t(L, "cal_soon")}</span>}
         </div>
         {(["icloud", "yandex", "fastmail", "other"] as const).map((prov) => (
           <details class="card provider">
-            <summary><h3><span class="kind kind-caldav">☁</span> {t(L, `cal_${prov}` as Key)}</h3></summary>
+            <summary><h3><Kind k="caldav" /> {t(L, `cal_${prov}` as Key)}</h3></summary>
             <form method="post" action={`/calendars/caldav${back}`} class="stack">
               <input type="hidden" name="provider" value={prov} />
               <p class="muted small">{t(L, `cal_help_${prov}` as Key)}</p>
@@ -353,7 +358,7 @@ export function CalendarsPage(p: Base & { conns: Connection[]; providers: { goog
           </details>
         ))}
         <details class="card provider">
-          <summary><h3><span class="kind kind-ics">🔗</span> {t(L, "cal_ics")}</h3></summary>
+          <summary><h3><Kind k="ics" /> {t(L, "cal_ics")}</h3></summary>
           <form method="post" action={`/calendars/ics${back}`} class="stack">
             <p class="muted small">{t(L, "cal_help_ics")}</p>
             <label>{t(L, "cal_ics_url")}<input name="url" required placeholder="https://… / webcal://…" autocomplete="off" /></label>

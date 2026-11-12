@@ -1,0 +1,10 @@
+# Allowlist: only what the image needs. Never the database (data/) or anything else local.
+*
+!package.json
+!bun.lock
+!tsconfig.json
+!server/**
+!shared/**
+!client/**
+!web/**
+!test/**

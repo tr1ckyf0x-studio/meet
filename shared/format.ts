@@ -34,6 +34,13 @@ export function fmtYmd(ymd: string, lang: Lang, withWeekday = false): string {
   return new Intl.DateTimeFormat(loc(lang), o).format(Date.UTC(y, m - 1, d, 12));
 }
 
+/** "12–18 Nov 2026", "28 Nov – 3 Dec 2026". */
+export function fmtYmdRange(a: string, b: string, lang: Lang): string {
+  const d = (ymd: string) => { const [y, m, dd] = ymd.split("-").map(Number) as [number, number, number]; return Date.UTC(y, m - 1, dd, 12); };
+  const f = new Intl.DateTimeFormat(loc(lang), { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" });
+  return a === b ? f.format(d(a)) : f.formatRange(d(a), d(b));
+}
+
 export function fmtDuration(min: number, lang: Lang): string {
   const days = Math.floor(min / 1440), hours = Math.floor((min % 1440) / 60), mins = min % 60;
   const parts: string[] = [];

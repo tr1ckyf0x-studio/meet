@@ -202,7 +202,12 @@ export function createApp(o: AppOptions) {
     const group = invite ? store.getGroupByInvite(invite) : null;
     const codeOk = !!code && !!o.signupCode && safeEqual(code, o.signupCode);
     const allowed = existing || ((group || codeOk) && (!group || inviteLimiter.allow(group.id)));
-    if (allowed && loginMails.take()) {
+    const domain = email.split("@").pop();
+    let send = false;
+    if (!allowed) o.log(`login mail to *@${domain} not sent: ${existing || group || codeOk ? "invitation rate limit" : invite ? "unknown invitation" : "no account and no invitation"}`);
+    else if (!loginMails.take()) o.log(`login mail to *@${domain} not sent: the daily login mail budget is spent`);
+    else send = true;
+    if (send) {
       const token = newToken();
       store.createLoginToken({
         hash: sha256(token), email, invite: group?.invite ?? null, signup: !existing && (codeOk || !!group),

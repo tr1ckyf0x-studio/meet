@@ -8,9 +8,11 @@ export interface Mailer { send(m: Mail): Promise<void> }
 
 export interface SmtpConfig { host: string; port: number; user: string; pass: string; from: string }
 
+const domainOf = (to: string) => to.split("@").pop() ?? "?";
+
 export class SmtpMailer implements Mailer {
   private readonly tr: Transporter;
-  constructor(private readonly cfg: SmtpConfig) {
+  constructor(private readonly cfg: SmtpConfig, private readonly log: (msg: string) => void = () => {}) {
     this.tr = nodemailer.createTransport({
       host: cfg.host, port: cfg.port, secure: cfg.port === 465, requireTLS: cfg.port === 587,
       auth: { user: cfg.user, pass: cfg.pass },
@@ -18,10 +20,12 @@ export class SmtpMailer implements Mailer {
     });
   }
   async send(m: Mail): Promise<void> {
-    await this.tr.sendMail({
+    const info = await this.tr.sendMail({
       from: this.cfg.from, to: m.to, subject: m.subject, text: m.text, html: m.html,
       attachments: m.attachments?.map((a) => ({ filename: a.filename, content: a.content, contentType: a.contentType })),
     });
+    // The relay's answer and id, to find the message in its own logs; never the full address.
+    this.log(`mail to *@${domainOf(m.to)} accepted: ${String(info.response).slice(0, 120)} ${info.messageId ?? ""}`);
   }
 }
 

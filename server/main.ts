@@ -29,7 +29,7 @@ if (opt("SMTP_HOST")) {
   mailer = new SmtpMailer({
     host: env("SMTP_HOST"), port: Number(env("SMTP_PORT", "587")), user: env("SMTP_USER"), pass: env("SMTP_PASS"),
     from: mailFrom,
-  });
+  }, log);
 } else {
   log("SMTP_HOST is not set: emails are printed to the log (development only)");
   mailer = new MemoryMailer(true);
